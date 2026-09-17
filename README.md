@@ -3,7 +3,7 @@ Alpha Engine is a local research pipeline for the NIFTY / India VIX complex. It 
 NIFTY / INDIAVIX research stack with optional RBI statement scores.
 
 RBI PDFs are **manual**. Put them in `data/raw/mpc_archive/` yourself.
-Nothing is downloaded from the internet for policy documents. Working on script 'downnload_rbi_pdfs.py' to automate the process.
+Nothing is downloaded from the internet for policy documents. Working on script `download_rbi_pdfs.py` to automate the process.
 
 ## Setup
 
