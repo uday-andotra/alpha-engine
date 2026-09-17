@@ -1,0 +1,738 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{setspace}
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\setstretch{1.15}
+\setlength{\parskip}{0.42em}
+\setlength{\parindent}{1.15em}
+
+\title{\textbf{Alpha Engine}\\[0.55em]
+\large Causal volatility regimes, policy-text sentiment,\\
+and research marks on NIFTY options:\\[0.25em]
+a single-volume technical narrative}
+\author{Udayveer Singh Andotra}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This is one document meant to do two jobs at once. It is the technical specification of Alpha Engine---a local research stack that fuses India VIX state with Reserve Bank of India statement language and then paper-trades two-percent out-of-the-money NIFTY options. It is also a self-contained course. A curious reader who has never priced an option should be able to start at Chapter~1 and finish with a working mental model of Garman--Klass variance, the variance risk premium, Ornstein--Uhlenbeck mean reversion, Hamilton Markov regimes, retrieval-augmented local LLMs, Hagan SABR, Kelly sizing, and why a 39~percent win rate can still be a coherent book. Every model is introduced as a sentence a beginner can keep, then derived far enough that a practitioner can argue with the implementation, then placed in a live-market setting where the sentence breaks. The engine is not a broker, not a signal service, and not a claim that India VIX has been forecasted. Historical rupee P\&L is a mark-to-model built from VIX and a default SABR smile. That limitation is treated as part of the subject matter, not as a footnote.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section*{A note to the reader}
+\addcontentsline{toc}{section}{A note to the reader}
+
+If you are new to volatility, read straight through and skip nothing until Chapter~6. If you already live on a vol desk, skim Chapters~1--2, then slow down at Chapters~5--8 and 11--13; those are the places where this project made reversible mistakes that look like ``more features'' when they were really identification errors. If you are here only to operate the repo, Chapter~10 is the map of files; everything else is why those files exist.
+
+I wrote the stack as a research instrument that had to run on a sixteen-gigabyte laptop, ingest RBI PDFs by hand, and refuse to cheat with full-sample Markov states. Those constraints are not embarrassing. They are the reason the document keeps asking \emph{what could have been known at date $t$?}
+
+\vspace{0.8em}
+\noindent\textit{Udayveer Singh Andotra}
+
+\newpage
+
+%================================================================
+\section{What the market is selling you}
+\label{ch:market}
+
+\subsection{An index is not a stock}
+
+NIFTY~50 is a capitalization-weighted basket of fifty large Indian listed companies. When someone says ``NIFTY was up one percent,'' they mean the basket's official close rose one percent, not that every name did. Options on NIFTY are cash-settled contracts on that basket. You never take delivery of fifty stocks. You take (or pay) the difference between the strike and the settlement value.
+
+That fact matters more than it sounds. A short put on one company can be a story about accounting fraud. A short put on NIFTY is a story about the Indian economy, global dollar liquidity, foreign-portfolio flows, and whatever the Reserve Bank said last Wednesday. Alpha Engine is built on the second story.
+
+\subsection{Price, return, and the first lie about risk}
+
+Let $S_t$ be the NIFTY close. A simple return is $R_t = S_t/S_{t-1}-1$. Beginners are taught that risk is the standard deviation of $R_t$. That is a starting point, not a destination. Two series can have the same standard deviation and completely different lives: one that dribbles $\pm 0.4\%$ every day, and one that sits still for a month and then gaps $4\%$ on a Sunday night in GIFT Nifty.
+
+Volatility is the \emph{scale} of movement. Direction is a separate question. You can lose money being right on direction if you bought insurance that was too expensive. You can make money being sloppy on direction if you bought insurance that was too cheap and the weather turned. Most of this document is about that second sentence.
+
+\subsection{Implied versus realized, said slowly}
+
+Stand in the NSE options pit---or, more honestly, in front of a screen that shows the option chain---and pick a one-month at-the-money put. It has a price in rupees. Black--Scholes~\cite{blackscholes1973} (Chapter~8) is a translator: it converts that rupee price into a number called implied volatility, quoted in annualized percent. If the translator says $16$, the market is charging as if NIFTY were going to move like a $16\%$ annualized process for the next month.
+
+Implied volatility is a \emph{price}. It is not a forecast that the Bureau of Statistics will later print $16\%$. What actually happens to NIFTY over that month, annualized, is realized volatility. The difference between what you were charged and what occurred is the seed of the variance risk premium (Chapter~4).
+
+India VIX is NSE's attempt to summarize that charge in one official number~\cite{nsevix}, built from a strip of out-of-the-money NIFTY options in the spirit of CBOE VIX~\cite{cboevix}. When this document says $V_t$, it means that index, in percent. When the code says \texttt{indiavix}, it usually means Yahoo's \texttt{\^{}INDIAVIX}, which is a cousin of the official series---close on quiet days, untrustworthy on gaps. That cousin relationship is a first-class limitation.
+
+\subsection{Why India, why text}
+
+A US vol book has VIX futures, a deep options tape, and a twenty-year academic literature. An India book has a shorter official VIX, a less liquid wing, and a central bank that still writes long monetary-policy statements in full sentences. Alpha Engine exists because those sentences are not decoration. ``Withdrawal of accommodation'' and ``support the growth impulse'' are different permissions for a short-put book. The engine's unusual choice is to treat the PDF as a state variable next to $V_t$, not as a blog post you read after the trade.
+
+%================================================================
+\section{A first walk through Alpha Engine}
+
+Before any formula, here is the job the software actually does on a good day.
+
+You download NIFTY open-high-low-close and India VIX from Yahoo, starting at a date you own (\texttt{ALPHA\_MARKET\_START}). You compute how turbulent the cash session was (Garman--Klass), how that compares with VIX (VRP), how extended VIX is versus its own mean (Ornstein--Uhlenbeck z-score), and the probability that you are in the jumpy hidden state of a two-regime Markov model. Separately, you drop RBI PDFs into a folder. A small local language model reads retrieved passages and emits a hawkish/dovish score in $[-1,1]$. That score is stamped with a calendar date and painted forward until the next statement.
+
+Once a day those objects are joined into a single \texttt{Decision}: buy a put, buy a call, sell a put, sell a call, or stand aside, plus a conviction in $[0,1]$ that scales position size. Size is a slice of \emph{current} equity, not a fantasy notionally reset every morning. The option that is imagined is a 30-day European, two percent out of the money, marked with Black--Scholes after a SABR smile has been draped over that day's VIX. It is held for a handful of sessions or until the decision flips, then closed. Rupees are points times lots times the NIFTY lot size.
+
+If that paragraph felt dense, it is supposed to. The rest of the document unpacks each clause until it is boring.
+
+%================================================================
+\section{Garman--Klass and the anatomy of a trading day}
+\label{ch:gk}
+
+\subsection{Why close-to-close is not enough}
+
+The textbook variance of daily returns uses only $C_t$ and $C_{t-1}$. Consider a session that opens at $22{,}000$, trades as high as $22{,}450$ and as low as $21{,}720$, and closes at $22{,}020$. The close-to-close return is almost nothing. Nobody who sat through that session would call it quiet. Parkinson (1980) noticed that the high--low range is a cleaner thermometer of intra-day diffusion. Garman and Klass~\cite{garman1980} added the open and close, building on the high--low estimator of Parkinson~\cite{parkinson1980}.
+
+\subsection{The estimator}
+
+Write $h_t=\ln H_t$, $\ell_t=\ln L_t$, $o_t=\ln O_t$, $c_t=\ln C_t$. A standard GK form is
+\begin{equation}
+  \widehat{\sigma}^{2}_{\mathrm{GK},t}
+  = \tfrac12 (h_t-\ell_t)^2
+  -(2\ln 2-1)\,(c_t-o_t)^2.
+\end{equation}
+The first term rewards a wide range. The second term subtracts the part of that range that is already explained by a trend from open to close, so a one-way drift is not double-counted as ``volatility.''
+
+Alpha Engine averages these daily variance prints over twenty-one sessions, multiplies by $252$ to annualize, and takes a square root. That number, $\sigma^{\mathrm{rv}}_t$, is a decimal (so $0.12$ is twelve percent). India VIX is quoted in percent. The code therefore compares $V_t$ with $100\cdot\sigma^{\mathrm{rv}}_t$, not with $\sigma^{\mathrm{rv}}_t$ itself. Unit mistakes here look like a ``broken VRP'' and are not philosophical.
+
+Extreme GK values are clipped. A bad tick that prints a low of $1$ rupee would otherwise dominate the twenty-one day window and announce a crisis that did not happen.
+
+\subsection{Why this estimator, not the others}
+
+Parkinson uses only high and low and is statistically efficient under ideal Brownian motion. It is blind to opens and overnight gaps. Yang and Zhang~\cite{yangzhang2000} is the grown-up estimator when overnight jumps are first-class, which they increasingly are for NIFTY because GIFT Nifty and SGX trade when Mumbai is closed. Alpha Engine stays on GK because the original mandate was a cash-session thermometer with no extra moving parts. If you rebuild this book for 2026-and-after live trading, Yang--Zhang is the correct next estimator, not a different religion.
+
+\subsection{Where GK lies}
+
+The derivation assumes continuous diffusion and observed highs and lows. Circuit breakers censor the range: the official high/low stop at the limit, so GK \emph{understates} variance on the days you most care about. Opening auctions, tick size, and a last-price bounce add microstructure noise the other way. On a limit-down day the engine can print a modest realized vol, a fat VRP, and a story that says ``implied looks rich'' when the truth is ``the tape was closed.'' A desk would not sell variance that afternoon on a GK reading.
+
+%================================================================
+\section{The variance risk premium}
+\label{ch:vrp}
+
+\subsection{The sentence to keep}
+
+Implied vol is what insurance costs. Realized vol is what the accident report says. When insurance regularly costs more than the accidents, selling insurance has a positive average---and a left tail that pays for that average.
+
+\subsection{Two definitions, do not mix them}
+
+The code stores a \emph{volatility-point} gap
+\begin{equation}
+  \mathrm{VRP}_t = V_t - 100\cdot\sigma^{\mathrm{rv}}_t.
+\end{equation}
+If VIX is $16$ and twenty-one day realized is $12\%$, $\mathrm{VRP}_t=4$. Positive means ``implied looks rich versus the recent past.''
+
+The academic variance risk premium~\cite{carrwu2009,bollerslev2009} is a statement about two probability measures:
+\begin{equation}
+  \mathrm{VRP}^{\mathrm{var}}_t
+  = \mathbb{E}^{\mathbb{Q}}_t\!\left[\int_t^{t+\tau} \sigma_u^2\,du\right]
+  - \mathbb{E}^{\mathbb{P}}_t\!\left[\int_t^{t+\tau} \sigma_u^2\,du\right].
+\end{equation}
+VIX squared is a (noisy, thirty-day) estimate of the first expectation. Subsequent realized variance is a noisy outcome of the second. They are cousins, not twins. This document uses the code's definition when discussing the repo and the academic one when discussing literature.
+
+\subsection{Why a desk cares}
+
+You do not need a stochastic-volatility model to ask ``am I being paid to sell this?'' VRP is the cheapest answer that uses only VIX and the cash index. It does not need an option chain, which Yahoo will not give you for 2016.
+
+\subsection{Why a desk does not trust it alone}
+
+Realized vol is backward-looking. After a month of sleep, VRP looks delicious the morning a geopolitical headline arrives. After a crash, realized vol stays high while VIX is already sliding back toward $16$, so VRP looks thin precisely when selling vol is starting to work again. Alpha Engine therefore refuses to let the sign of VRP cast a majority vote. In an earlier draft it did (a $0.45$ weight). The blotter became a put-buying machine because GK realized often sat above Yahoo VIX. That was not ``the market telling us vol is cheap.'' That was one feature bullying the others.
+
+\subsection{The economic content you should not unlearn}
+
+A structurally positive variance risk premium on equity indices is one of the most replicated facts in empirical finance~\cite{carrwu2009,bollerslev2009}. It is compensation for states of the world in which wealth is already down and you are being asked to pay on short puts. A year with a $25\%$ hit rate and a hole in 2020 is consistent with that story. A year with a $60\%$ hit rate on a three-month window is not evidence you found a better premium; it is evidence you sampled a quiet tape.
+
+%================================================================
+\section{Mean reversion: the Ornstein--Uhlenbeck view of VIX}
+\label{ch:ou}
+
+\subsection{The sentence to keep}
+
+VIX is not a stock. It is pulled toward a long-run level. Spikes fade. That pull has a speed and a typical size. The z-score is how many typical sizes you are away from the pull's target \emph{as estimated using only the past}.
+
+\subsection{The stochastic differential equation}
+
+\begin{equation}
+  dV_t = \theta(\mu - V_t)\,dt + \sigma\,dW_t.
+\end{equation}
+Here $\mu$ is the attractor, $\theta>0$ is the strength of the spring, $\sigma$ is residual noise, and $W_t$ is Brownian motion. The same linear mean-reverting diffusion appears in Ornstein and Uhlenbeck~\cite{ou1930} and, in interest-rate form, in Vasicek~\cite{vasicek1977}. If $V_t>\mu$, the drift is negative: fear is expected to ease. If $V_t<\mu$, the drift is positive: fear is expected to rebuild toward normal.
+
+The half-life of a deviation is $\ln 2/\theta$. One calibration on this project printed $\mu\approx 16.5$ and a half-life of a fraction of a year. In English: India VIX forgets, and it forgets on a horizon of months, not decades.
+
+The stationary variance of an OU process is $\sigma^2/(2\theta)$. That is the natural denominator for a z-score
+\begin{equation}
+  z_t = \frac{V_t-\hat\mu_t}{\sigma_t/\sqrt{2\hat\theta_t}}.
+\end{equation}
+
+\subsection{How the code estimates $(\theta,\mu,\sigma)$}
+
+In discrete time a first-order autoregression
+\begin{equation}
+  V_t - V_{t-1} = a + b V_{t-1} + \varepsilon_t
+\end{equation}
+maps to $\theta$ and $\mu$ by matching drift terms. The residual scale maps to $\sigma$. This is ordinary least squares, not a drama.
+
+The drama is the window. If you estimate $\mu$ on 2015--2026 and then compute $z_{2016}$, you have told 2016 about COVID. Alpha Engine uses an \emph{expanding} window: at $t$, only $\{V_s:s\le t\}$ is visible. The first year of z-scores is noisy because $\mu$ is still being learned. That noise is the price of honesty.
+
+\subsection{Why OU rather than a random walk or GARCH}
+
+A random walk on VIX says last week's fear is this week's starting point with no spring. Empirically the spring is the whole point. GARCH models the variance of \emph{NIFTY returns}. That is a different object from the level of VIX. You can have GARCH on returns and OU on VIX in the same book. They are not substitutes.
+
+\subsection{Where OU lies}
+
+The Gaussian increment is wrong. VIX jumps up faster than it crawls down. An OU z-score treats a two-day spike to $28$ as ``four standard deviations, so fade it'' at the exact moment a trader's job is not to fade it. That is why the decision layer has a separate \emph{breaking} rule on five-day percentage change and raw VIX level. The z-score is the spring. The breaking rule is the jump.
+
+OU is also slow to admit that $\mu$ itself moved. The 2013--2016 India vol regime and the 2021--2024 low-vol regime do not share a soul. An expanding OLS $\mu$ is a compromise between ``use all history'' and ``forget 2013.'' A rolling ten-year window, or a time-varying $\mu_t$ as a slow random walk, is the next honest model.
+
+%================================================================
+\section{Hidden weather: Markov-switching regimes}
+\label{ch:markov}
+
+\subsection{The sentence to keep}
+
+Some months are a different planet from other months. A two-state Markov chain is a weather model: today's state makes tomorrow's state more likely to be the same, and each state has its own typical VIX level and its own typical gustiness.
+
+\subsection{Hamilton's idea~\cite{hamilton1989}, without the textbook fog}
+
+Let $R_t\in\{0,1\}$ be unseen. Conditional on the state,
+\begin{equation}
+  \tilde V_t \mid R_t=i \;\sim\; \mathcal{N}(\mu_i,\sigma_i^2),
+\end{equation}
+where $\tilde V_t$ is standardized VIX (the engine scales before fitting so numerical optimization does not fight units). The state evolves as
+\begin{equation}
+  \mathbb{P}(R_t=j\mid R_{t-1}=i)=P_{ij}.
+\end{equation}
+A large $P_{00}$ means calm weather persists. A small $P_{01}$ means you do not jump to the storm every other Tuesday.
+
+What you can compute at the close of day $t$, using only $V_1,\ldots,V_t$, is the filtered probability
+\begin{equation}
+  p_t=\mathbb{P}(R_t=\text{high-vol}\mid V_1,\ldots,V_t).
+\end{equation}
+What you must not use in a backtest is the smoothed probability $\mathbb{P}(R_t\mid V_1,\ldots,V_T)$, which has read 2020 while labelling 2018.
+
+\subsection{Which state is the storm?}
+
+The optimizer names states $0$ and $1$ as it pleases. Early code assumed ``state 1 is high vol'' and, when parameter names were missing, defaulted to that guess. The current code compares the two residual variances---or, if names are absent, the probability-weighted variance of VIX in each state---and assigns the storm label to the larger one. If you ever see a dashboard where ``high vol'' lights up in a dead tape, look here first.
+
+\subsection{Causal refit}
+
+The engine refits roughly every twenty-one sessions on data up to now. That is slower than an ideal sequential Bayesian update and faster than a once-and-forever 2015--2026 fit. Twenty-one is a trading month, not a theorem.
+
+\subsection{Why two states, why not a threshold}
+
+``High vol if $V_t>20$'' treats $V_t=19$ after a month at $13$ as identical to $V_t=19$ after a month at $28$. The hidden state is persistence. Two states are coarse---2018 emerging-market wobble, 2020 COVID, and 2022 global hiking are not the same storm---but three states on three thousand daily points overfit the last crisis and then look brilliant in-sample.
+
+\subsection{The lag you will not code away}
+
+Filtered probabilities update after the first shock print, not before it. The Monday that VIX goes from $13$ to $22$ still ``looks calm'' at Monday's open in any causal filter. That is why Alpha Engine will not let $p_t\ge 0.5$ be the only permission to buy a put. The breaking rule exists to cover the first day the filter is late.
+
+%================================================================
+\section{A short-horizon VIX forecast that is allowed to veto}
+\label{ch:forecast}
+
+\subsection{The sentence to keep}
+
+The project does not predict ``VIX tomorrow equals $17.4$.'' It predicts a five-session \emph{percentage change} with a ridge regression trained only on changes that have already realized, and then uses that number as a veto: do not sell vol if the forecast says fear is about to rise; do not buy vol if the forecast says fear is about to fall---unless the tape is already breaking.
+
+\subsection{The regression}
+
+Features at $t$ are the OU z-score, VRP, the five-day realized VIX change, and $p_t$. The label is $V_{t+5}/V_t-1$. At date $t$ the model is fit on rows whose label was known, i.e.\ whose $t'+5$ is already in the past. Coefficients are $L_2$-shrunk (ridge) because four correlated thermometers of the same object will otherwise fight.
+
+This is a small, causal, linear nowcast. It is not HAR-RV, not a neural net, and not a VIX futures curve. It exists because a rules book that never asks ``and then what?'' will sell vol into an already-rising tape.
+
+\subsection{How it accidentally deleted an entire side of the book}
+
+On a multi-year decline in India VIX, a one-year percentile says ``cheap'' most days, and a ridge trained on mean-reverting data says ``a rise is coming'' most days. Combined, the forecast veto cancelled almost every intended short. The blotter became long puts. One version of that book made about eight percent with a six percent drawdown and a $39\%$ hit rate---convexity working. Loosening the veto to ``force shorts back in'' made the same book lose money. The lesson is not ``forecasts are bad.'' The lesson is that a veto is a position, and on this sample that position \emph{was} the short-vol side.
+
+%================================================================
+\section{Language as a state: RBI statements and local LLMs}
+\label{ch:nlp}
+
+\subsection{The sentence to keep}
+
+A monetary-policy PDF is a dated event. The engine compresses it into a number $s_t\in[-1,1]$ and then refuses to pretend that number existed before the date on the file.
+
+\subsection{Why a number at all}
+
+You cannot put five thousand words into a position sizer. You can put a stance. By convention here, positive is hawkish (inflation, tightening, withdrawal of accommodation) and negative is dovish (growth, easing, accommodation). Zero is not ``the repo was unchanged.'' Zero is ``the language does not lean.'' Unchanged repos with hawkish paragraphs should not score zero; an early prompt that used $0.0$ as the JSON example taught small models to copy $0.0$ and then write a clever sentence. That bug is documented because it will return the moment someone pastes an example score into a prompt again.
+
+\subsection{The pipeline, without romance}
+
+PDFs live in \texttt{data/raw/mpc\_archive/}. Automatic download from the RBI site was attempted, then removed, because a laptop job that depends on a brittle scrape will fail silently and you will think the model is broken. You drop files. Filenames should carry \texttt{YYYY-MM-DD} (year-month-day, never year-day-month).
+
+The file is split into overlapping character chunks. Each chunk is embedded with MiniLM, a small sentence transformer that turns a paragraph into a few hundred numbers such that similar paragraphs sit nearby. Those vectors live in Chroma. At score time the engine asks for chunks about repo, inflation, growth, hike, cut, accommodation---not for the title page.
+
+A local Ollama model sees those chunks and must return JSON. The call has a timeout measured in tens of seconds. If Ollama is not running, or if \texttt{llama3.1:8b} has eaten thirteen gigabytes of a sixteen-gigabyte machine, the call hangs until the timeout and a keyword tilt (hawkish minus dovish phrase counts) is used so the pipeline does not die.
+
+The score is written to DuckDB with its date. Every later trading day inherits it until a newer dated file arrives. That is how a quarterly statement becomes a daily column without smearing it backward onto 2015.
+
+\subsection{Why RAG on a small model, why not a 70B API}
+
+Retrieval-augmented generation is a long name for ``do not paste the whole PDF.'' Small models lose the plot in long contexts. They also physically do not fit next to Chrome and a Python process on a sixteen-gigabyte Mac. The right local models for this job were in the three-to-four-billion parameter class. Quality drops. Completeness of the run rises. For a stance in $[-1,1]$, that trade is acceptable. For legal analysis of the statement, it is not.
+
+\subsection{What sentiment is allowed to do}
+
+In the connected decision object, $s_t$ does not open a trade. Vol state opens or refuses the trade. Sentiment picks the wing and, if the statement is less than fifteen sessions old, adds conviction. A dovish score can veto a short put when the tape is already nervous. A hawkish score can steer a rich-vol day toward selling calls rather than puts.
+
+If you have one May 2026 PDF, then $s_t=0$ for the decade before that date. The ``RBI-aware book'' you think you are testing is a vol book with a 2026 sticker. Populating the archive is the highest-leverage enhancement in Chapter~13 because it requires no new mathematics.
+
+%================================================================
+\section{Options, smiles, SABR, and the mark that is not a fill}
+\label{ch:opt}
+
+\subsection{The sentence to keep}
+
+An option price is a compressed view of a distribution. Black--Scholes assumes that distribution is lognormal with one volatility. The market disagrees, especially on downside strikes. SABR is a way to let volatility change with strike. Alpha Engine uses Black--Scholes as the cash register and SABR as the smile draped over today's VIX, because history does not contain a free NSE chain.
+
+\subsection{Black--Scholes as a translator}
+
+With spot $S$, strike $K$, rate $r$, tenor $T$, volatility $\sigma$,
+\begin{align}
+  d_1 &= \frac{\ln(S/K)+(r+\sigma^2/2)T}{\sigma\sqrt{T}},\qquad
+  d_2=d_1-\sigma\sqrt{T},\\
+  C &= S\Phi(d_1)-Ke^{-rT}\Phi(d_2),\\
+  P &= Ke^{-rT}\Phi(-d_2)-S\Phi(-d_1).
+\end{align}
+$\Phi$ is the standard normal distribution function. Put-call parity
+\begin{equation}
+  C-P = S-Ke^{-rT}
+\end{equation}
+is a check, not a decoration. The unit tests of this repo include that check.
+
+Tenor in the blotter starts at thirty calendar days and bleeds while the trade is held. Rates default to a constant $6.5\%$ rupee cash rate. That is a research convenience, not the overnight MIBOR path.
+
+\subsection{Why two percent out of the money}
+
+Two percent is close enough to feel the spot and far enough to be a wing. Strikes are rounded to fifty NIFTY points because listed strikes live on a grid. The lot size defaults to sixty-five, which is a configurable snapshot of the contract unit and will go stale when NSE changes it.
+
+\subsection{SABR, said as a story}
+
+Let $F$ be the forward. SABR says the forward is driven by a volatility $\alpha_t$ that is itself random, and the two Browns are correlated:
+\begin{equation}
+  dF=\alpha F^{\beta}\,dW^{(1)},\qquad
+  d\alpha=\nu\alpha\,dW^{(2)},\qquad
+  d\langle W^{(1)},W^{(2)}\rangle=\rho\,dt.
+\end{equation}
+$\beta=1$ is the lognormal backbone used here (equity index default). $\rho<0$ is the leverage effect: spot down, vol up, which is why OTM puts trade rich. $\nu$ is how violently the smile flexes.
+
+Hagan's expansion~\cite{hagan2002} gives an implied vol $\sigma_{\mathrm{SABR}}(K)$ in closed form. For a broader reading of the surface see Gatheral~\cite{gatheral2006}. Alpha Engine sets $\alpha$ from India VIX (the ATM height), freezes $\rho\approx-0.35$ and $\nu\approx0.75$, and reads $\sigma_{\mathrm{SABR}}$ at the two-percent strike. Then Black--Scholes is called with that $\sigma$, not with raw VIX.
+
+\subsection{Why this is both a step forward and still a lie}
+
+Flat Black--Scholes on VIX prices a two-percent put as if it had ATM vol. Real OTM puts are richer. In a crash the paper mark of a long put is therefore \emph{too small}, and the paper mark of a short put is \emph{too kind}. Both biases flatter the wrong side of a disaster. A live calibrator to today's NSE chain---which the repo also contains---is the correct tool for \emph{today}. It cannot mark 2017 unless you stored 2017's chain.
+
+Sprint~1 of this project shipped SABR and a live fetcher. That made it feel as if SABR were ``already running'' on the historical blotter. It was not. Two pipes existed. Only later were they joined, and even then only as VIX-height plus default shape.
+
+\subsection{P\&L arithmetic}
+
+A long option:
+\begin{equation}
+  \Pi = \bigl(P_{\mathrm{exit}}-P_{\mathrm{entry}}-2c\bigr)\times\text{lots}\times 65,
+\end{equation}
+with $c=0.5$ points a side as a toy spread. Shorts flip the difference. Equity updates. The next trade sizes off the new equity. If equity falls through thirty-five percent of start, the engine stops. This is not SPAN margin. It is a fuse so a short-put fantasy cannot print crores of losses on a ten-lakh notionally reset book---which an earlier version did.
+
+%================================================================
+\section{Sizing, Kelly, and the secondary filter}
+\label{ch:size}
+
+\subsection{The sentence to keep}
+
+Bet a small, known fraction of the pile you actually have. Do not bet a fraction of a pile you had in 2015. After you have lost enough times in the same weather, consider skipping.
+
+\subsection{Kelly as a ceiling}
+
+For a binary bet with win probability $p$ and payoff ratio $b$ (win size over loss size),
+\begin{equation}
+  f^{\star}=p-\frac{1-p}{b}.
+\end{equation}
+Kelly~\cite{kelly1956} derived $f^{\star}$ as the growth-optimal fraction. Full Kelly maximizes asymptotic growth and also maximizes the chance you look like an idiot in any finite sample. Half-Kelly is the industry's shrug. Alpha Engine computes a Kelly-like fraction and then mostly ignores it in favour of a $1.2\%$ equity cap, because estimated $p$ on two-percent NIFTY wings is not a number you should lever.
+
+Short options use three times premium as the unit of risk. That is a haircut, not a model of SPAN. A real short-put book in March 2020 was a margin event, not a premium event.
+
+\subsection{Meta-labeling}
+
+L\'opez de Prado's~\cite{lopez2018} useful idea is to split ``should a trade exist?'' from ``should I take this one?'' The primary rule proposes. The secondary model, an XGBoost classifier, estimates $\mathbb{P}(\text{this trade wins}\mid\text{features at entry})$. After forty closed trades the engine begins to skip when that probability is below $0.48$, and otherwise scales conviction.
+
+Forty observations is a toy. Feature names overlap the primary rule, so the classifier often relearns the rule and then refuses trades the rule already liked. Treat the wiring as a completed homework, not as a demonstrated edge. Meta-labeling starts to matter when the primary book has thousands of bets and a clean label. A six-day two-percent wing marked on VIX is a muddy label.
+
+%================================================================
+\section{The daily decision, written as law}
+\label{ch:law}
+
+The function \texttt{decide(row)} is the constitution. Models may estimate. This function acts.
+
+\paragraph{Inputs.} $V_t$, its one-year percentile $q_t$, its five-day change, OU $z_t$, $\mathrm{VRP}_t$, Markov $p_t$, sentiment $s_t$, days since the last dated PDF, five-day forecast $\hat r_{t,t+5}$.
+
+\paragraph{Vol weather.}
+If $V_t$ is in a shock---at least $24$ and still rising, or a violent five-day jump from already-elevated levels---the weather is \emph{breaking}: buy puts.
+Else if $q_t$ is in the top third of the last year, weather is \emph{rich}: sell premium, unless the forecast veto fires.
+Else if $q_t$ is in the bottom third, weather is \emph{cheap}: buy premium, unless the forecast veto fires.
+Else stand aside.
+
+\paragraph{Wing.}
+Hawkish $s_t$ steers shorts toward calls (upside capped by tighter policy) and adds weight to puts when already buying vol.
+Dovish $s_t$ steers cheap-vol buys toward calls if the tape is calm, and forbids short puts if the tape is nervous.
+
+\paragraph{Freshness.}
+A statement younger than fifteen sessions may raise conviction. It may not invent a trade out of dead vol unless the score is extreme.
+
+\paragraph{Forecast veto.}
+A predicted five-day VIX rise above two and a half percent cancels a short. A predicted drop of the same size cancels a non-shock long. Loosening that veto, on this sample, made the book worse.
+
+\paragraph{What this law is not.}
+It is not an optimizer. It is not a neural net. It is an inspectable sentence so that when the blotter prints one hundred and seventy-six buy-puts and zero sells, you can find the clause that did it (percentile plus veto on a falling VIX decade) instead of adding another library.
+
+%================================================================
+\section{Map of the repository}
+\label{ch:repo}
+
+This chapter is an inventory, not a greatest-hits list. Every Python module in the tree is named below, with whether the main pipeline imports it. Package \texttt{\_\_init\_\_.py} files exist under \texttt{src/}, \texttt{data\_pipeline/}, \texttt{features/}, \texttt{models/}, \texttt{execution/}, and \texttt{dashboard/}; they make imports work and contain no strategy.
+
+\subsection{Entry points you run}
+
+\begin{center}
+\begin{tabular}{@{}p{0.52\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Path & Pipeline job \\
+\midrule
+\texttt{scripts/run\_daily\_market\_update.py} & Yahoo OHLC + VIX $\to$ GK, VRP, OU $z$, fuse, Markov $\to$ DuckDB + \texttt{data/processed} \\
+\texttt{scripts/run\_batch\_nlp\_pipeline.py} & Archive PDFs $\to$ chunks, embeddings, Ollama score, paint $s_t$, refit regimes \\
+\texttt{scripts/run\_backtest.py} & Options blotter via \texttt{options\_pnl}; also runs the index overlay \\
+\texttt{src/dashboard/app.py} & Streamlit terminal on \texttt{regime\_predictions} and \texttt{option\_trades} \\
+\texttt{src/visualization/regime\_plotter.py} & Standalone Matplotlib of VIX vs $p_t$ vs $s_t$ \\
+\texttt{scripts/run\_async\_nlp\_pipeline.py} & Optional: copy one PDF into the archive, then call batch NLP \\
+\texttt{scripts/download\_rbi\_pdfs.py} & Optional: prints the manual archive path; does not download \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Core modules on the research path}
+
+These are imported by daily update, batch NLP, the options blotter, or the dashboard.
+
+\begin{center}
+\begin{tabular}{@{}p{0.52\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Path & Purpose in the pipeline \\
+\midrule
+\texttt{src/bootstrap.py} & Puts \texttt{src/} on \texttt{sys.path} \\
+\texttt{src/config.py} & Paths, tickers, start date, lot, risk cap, Ollama model, SABR defaults \\
+\texttt{src/data\_pipeline/db\_utils.py} & DuckDB create / overlap-safe insert / load \\
+\texttt{src/data\_pipeline/market\_fetcher.py} & \texttt{\^{}NSEI} and \texttt{\^{}INDIAVIX} with ticker fallbacks \\
+\texttt{src/data\_pipeline/dates.py} & \texttt{YYYY-MM-DD} from filenames and statement text \\
+\texttt{src/data\_pipeline/nlp\_scraper.py} & Load PDF, chunk, attach statement date \\
+\texttt{src/data\_pipeline/exports.py} & Snapshot tables into \texttt{data/processed/*.parquet} \\
+\texttt{src/features/vol\_math.py} & Garman--Klass variance and expanding OU z-score \\
+\texttt{src/features/quantitative\_metrics.py} & Writes \texttt{market\_features}: RV, VRP, $z_t$ \\
+\texttt{src/features/signal\_aggregator.py} & Dated \texttt{sentiment\_events}; forward-fill onto the panel \\
+\texttt{src/features/text\_embeddings.py} & MiniLM embeddings into Chroma \\
+\texttt{src/features/vix\_forecast.py} & Causal 5-day Ridge on VIX returns \\
+\texttt{src/models/regime\_classifier.py} & Two-state Markov, causal refit, writes $p_t$ \\
+\texttt{src/models/regime\_utils.py} & Identifies which state has larger variance \\
+\texttt{src/models/llm\_sentiment.py} & Ollama JSON score, timeout, keyword fallback \\
+\texttt{src/models/vol\_surface.py} & SABR Hagan; \texttt{sabr\_iv\_from\_vix} for blotter marks \\
+\texttt{src/models/meta\_labeler.py} & Triple barrier helper + XGB $P(\mathrm{win})$ \\
+\texttt{src/execution/strategy.py} & \texttt{decide()} / \texttt{route\_row()}: the daily law \\
+\texttt{src/execution/options\_pnl.py} & Walk-forward options ledger and equity cap \\
+\texttt{src/execution/black\_scholes.py} & European price in index points \\
+\texttt{src/execution/position\_sizer.py} & Half-Kelly ceiling (overlay and tests) \\
+\texttt{src/dashboard/components.py} & Plotly VIX / high-vol window / stance chart \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Overlay-only and live-only}
+
+\begin{center}
+\begin{tabular}{@{}p{0.52\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Path & Status \\
+\midrule
+\texttt{src/execution/backtester.py} & NIFTY close-to-close overlay used by \texttt{run\_backtest.py}. Not option P\&L. Ignore its tearsheet when judging the vol book. \\
+\texttt{src/execution/options\_engine.py} & Live NSE chain fetch + old \texttt{route\_signal}. \emph{Not imported} by daily update, NLP, options blotter, or dashboard. Optional \texttt{\_\_main\_\_} only. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Tests}
+
+\begin{center}
+\begin{tabular}{@{}p{0.52\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Path & What it locks \\
+\midrule
+\texttt{tests/conftest.py} & Adds \texttt{src/} to \texttt{sys.path} for pytest \\
+\texttt{tests/test\_data\_pipeline.py} & GK sign, OU recovery of $\mu$, PDF dates, LLM JSON fences \\
+\texttt{tests/test\_models.py} & Kelly bounds, Markov label, SABR ATM, triple barrier, BS parity, one connected \texttt{decide()} case \\
+\texttt{tests/test\_strategy.py} & Percentile buckets, forecast veto, hawkish call wing, conviction \\
+\texttt{tests/test\_signal\_aggregator\_api.py} & \texttt{statement\_date} / \texttt{override\_date} alias still exists \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Run \texttt{PYTHONPATH=src python -m pytest -q}. The aligned suite is twenty-five tests.
+
+\subsection{Notebooks}
+
+\begin{center}
+\begin{tabular}{@{}p{0.52\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Path & Reads \\
+\midrule
+\texttt{notebooks/01\_market\_and\_regimes.ipynb} & VIX, $p_t$, VRP, $z_t$ from processed parquet or DuckDB \\
+\texttt{notebooks/02\_rbi\_sentiment.ipynb} & Archive listing and forward-filled $s_t$ \\
+\texttt{notebooks/03\_options\_pnl.ipynb} & Blotter by year/action and last \texttt{Decision} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Tables and the processed folder}
+
+DuckDB lives at \texttt{data/duckdb/alpha\_engine\_data.db}:
+
+\texttt{historical\_market\_data}, \texttt{market\_features}, \texttt{sentiment\_events}, \texttt{fused\_features}, \texttt{regime\_predictions}, \texttt{option\_trades}, \texttt{backtest\_results}.
+
+The last table is the index overlay. Do not quote it as the options book.
+
+\texttt{data/processed/} is no longer an empty directory. After each main script, \texttt{exports.py} writes the tables that exist as parquet (csv if parquet fails). Notebooks prefer those snapshots, then fall back to DuckDB.
+
+Run order remains: daily market update, then batch NLP, then backtest, then dashboard or notebooks. Sentiment is not computed inside the market job; ``zero sentiment events'' after a daily update is expected until batch NLP has run.
+
+%================================================================
+\section{Causality, look-ahead, and other ways to fake a Sharpe}
+\label{ch:causal}
+
+A number is causal at $t$ if a person locked in a room with only information dated $\le t$ could have produced it.
+
+\begin{itemize}[leftmargin=1.2em]
+  \item Using today's close to trade today's close is an end-of-day convention, not high-frequency fiction.
+  \item Expanding OU and trailing Markov are causal. Full-sample smoothed states are not.
+  \item A ridge that trains on $V_{t+5}$ as of date $t$ is not causal. Training on labels that already settled is.
+  \item An LLM score with a filename date of $2026$-$05$-$08$ applied to $2026$-$05$-$07$ is a leak. Applied from $2026$-$05$-$08$ forward is not.
+  \item SABR $\rho$ frozen at $-0.35$ is not a leak. It is an assumption. Those are different sins.
+  \item Painting one sentiment number across the last thirty days because the model forgot to return a date---an early version---is theatre. It makes a chart. It is not a time series.
+\end{itemize}
+
+The index overlay's first Sharpe used CAGR in the numerator. That is not look-ahead. It is simply the wrong statistic. It is mentioned here so you do not trust old screenshots.
+
+%================================================================
+\section{What the empirical blotter actually said}
+\label{ch:emp}
+
+This chapter is the opposite of a marketing page.
+
+When the router defaulted to selling puts whenever $p_t$ was below one half, yearly P\&L was negative almost every calendar year from 2015 through 2025. Win rates near fifty percent coexisted with large rupee losses: small collected premia, fat left tails. 2020 was the confession.
+
+When the router was inverted into ``buy puts whenever anything looks slightly cheap,'' win rates fell to the low thirties and the book still lost money, because the puts that were not in a genuine shock died of theta.
+
+When the law in Chapter~9 was combined with a tight forecast veto, the blotter printed on the order of plus eight percent total return, a profit factor a little above one, a drawdown near six percent, and a hit rate near thirty-nine percent---almost entirely long puts. A few sessions in 2026 paid for a cemetery of expired wings. That is a coherent convex book. It is not a carry book.
+
+Loosening the veto to drag shorts back in moved the same code to a loss and a double-digit drawdown without producing a healthy two-sided mix. Forcing a product the sample does not want is not ``completing the strategy.''
+
+The index overlay, throughout, printed a high-forties hit rate, a mid-sixes negative CAGR, and a fifty-percent drawdown. It is a different mandate. Stop reading it.
+
+%================================================================
+\section{Real-world rooms this model has not entered}
+\label{ch:real}
+
+\subsection{The open}
+
+NIFTY's cash open is an auction. India VIX Yahoo bars are daily. The engine is an end-of-day creature. It cannot speak about the first fifteen minutes, which is where a lot of event-vol is born and dies.
+
+\subsection{The RBI morning}
+
+Vol is usually bid going into a policy announcement. After a hold-and-blah statement it is offered. Scoring the PDF at dinner is a research act. It is not capturing the crush. If you want that trade, you need timestamps, a chain, and permission to be flattened at $T-1$ whether or not the LLM has finished its sentence.
+
+\subsection{The crash}
+
+Bids vanish on the wing. The $0.5$ point cost is comedy. SPAN margin on short puts becomes the whole job. Long OTM puts pay more than a VIX-height SABR mark will admit. The engine's long-vol drawdowns are debit drawdowns. They are not a simulation of being short.
+
+\subsection{The listed weeklies}
+
+The living product is a weekly expiry, not a thirty-day Platonic European. Rolling weeklies has a calendar-spread personality the blotter never sees. A rebuild that does not face listed expiries is still a teaching blotter.
+
+\subsection{The other people}
+
+Vol-target funds, systematic put-write ETFs (in markets that have them), and every CTA that buys weakness in VIX are your classmates. When the bottom tercile of VIX is a crowded long-put, VRP is not a premium; it is a fee you pay each other.
+
+\subsection{The machine}
+
+\texttt{llama3.1:8b} on a sixteen-gigabyte laptop is not a modelling choice. It is a denial-of-service against yourself. The document records that because ``just use a better model'' is how jobs hang at midnight.
+
+%================================================================
+\section{Why each process was chosen}
+\label{ch:why}
+
+GK exists because the project had OHLC and needed a session thermometer. VRP exists because a desk's first question is payment, not the level of VIX. OU exists because VIX is a sprung process and a z-score is the least dramatic way to say ``extended.'' Markov exists because persistence is not a threshold. Ridge exists because a rules book that never asks ``what next?'' will sell into a wave. MiniLM and Chroma exist because a four-billion-parameter model cannot read a whole PDF. Ollama exists because the work had to stay on the machine. Rules exist because a fitted classifier from four thermometers to ``buy put'' will memorize 2020. SABR-from-VIX exists because a smile was required and a historical chain was not. The equity cap exists because the first blotter sized every trade off a reset ten lakh and invented crores.
+
+Rejected on purpose: full-sample smoothed Markov, Google-dork downloads as a required step, painting a score on the last thirty days, eight-billion-parameter local models as a default, live NSE marks inside a 2015--2024 loop.
+
+%================================================================
+\section{A roadmap that is not a wish list}
+\label{ch:future}
+
+Do these in order. The first item beats any new model.
+
+\begin{enumerate}[leftmargin=1.3em]
+  \item Put dated MPC PDFs for 2015--2025 in the archive and rerun batch NLP. Until then the RBI chapter is a 2026 appendix.
+  \item Replace Yahoo VIX with NSE's official series. Replace inner-join gaps with an explicit missingness flag, not silence.
+  \item Store daily option chains if you want SABR to be an estimate rather than a costume.
+  \item Add an event calendar (MPC, Budget, CPI) and flatten shorts in a window around them whether or not $q_t$ is rich.
+  \item Rebuild P\&L on listed weeklies with bid/ask. Retire the thirty-day imaginary contract as a teaching device.
+  \item Give VIX jumps their own process (jump-OU or a Hawkes intensity). Stop asking Gaussian OU to fade a spike that is still printing.
+  \item Only then spend time on three-state Markov, HAR-X forecasts, or a larger meta-labeler.
+  \item Delete or quarantine the index overlay so two tearsheets cannot be mistaken for one book.
+\end{enumerate}
+
+%================================================================
+\section{How a curious reader should practice}
+
+Do not start by editing \texttt{decide()}. Start by breaking the thermometers.
+
+Compute GK by hand for one noisy day and for one limit-down day. Fit OU on 2015--2019 and stare at $z_{2020}$ versus the expanding $z_{2020}$. Flip Markov state labels and watch every hedge become a short. Score one PDF with two local models and write down $\Delta s_t$ next to the $0.15$ hawkish threshold. Turn the forecast veto off, record profit factor and drawdown, and walk away without tuning. Read Hagan on SABR until the $\rho<0$ sentence is obvious. Read Hamilton until filtered versus smoothed is obvious. Read L\'opez de Prado until you are embarrassed by forty training rows.
+
+When those exercises are boring, the repo will look small---which is the point of a one-document course. The remaining difficulty is not Python. It is identification: when is India variance cheap \emph{conditional on} policy path, global vol, and the calendar, in a sample that includes fills? That question is not answered here. It is the question this stack was built to make askable.
+
+\newpage
+\appendix
+\section{Default parameters}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Item & Default \\
+\midrule
+Sample start & 2015-01-01 \\
+GK window & 21 sessions \\
+OU minimum history & 252 sessions \\
+Markov states / refit cadence & 2 / 21 sessions \\
+Imagined tenor / hold & 30 days / 6 sessions \\
+Moneyness / grid & $2\%$ OTM / 50 points \\
+Lot & 65 \\
+Cash rate in BS & $6.5\%$ \\
+Risk cap / halt & $1.2\%$ of live equity / $35\%$ of start \\
+Wing cost & $0.5$ points a side \\
+SABR $(\beta,\rho,\nu)$ & $(1,-0.35,0.75)$ \\
+Forecast horizon / veto & 5 sessions / $\lvert\hat r\rvert>2.5\%$ \\
+Meta-label skip & $\hat p<0.48$ after 40 closes \\
+Embedding & MiniLM-L6-v2 \\
+LLM & \texttt{ALPHA\_OLLAMA\_MODEL} in \texttt{.env} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Glossary}
+
+\begin{description}[style=nextline,leftmargin=1.2em]
+  \item[ATM] At the money: strike near spot.
+  \item[Causal] Computable from information dated on or before $t$.
+  \item[Conviction] Number in $[0,1]$ that scales the risk cap.
+  \item[Filtered probability] Markov state belief using data up to $t$ only.
+  \item[Forward-fill] Repeat the last dated sentiment until a new statement.
+  \item[Half-Kelly] Half the growth-optimal fraction; a humility device.
+  \item[Hawkish / dovish] Policy language leaning tight / easy.
+  \item[Implied volatility] The $\sigma$ that makes Black--Scholes match a market price.
+  \item[India VIX] NSE's 30-day implied vol index on NIFTY.
+  \item[Look-ahead] Using information from after $t$ to decide at $t$.
+  \item[Mark-to-model] A price from a formula, not from a bid you can hit.
+  \item[OTM] Out of the money.
+  \item[Smoothed probability] Markov belief that has seen the whole sample.
+  \item[SPAN] Exchange margin algorithm; not ``three times premium.''
+  \item[Theta] The bleed of option value as calendar time passes.
+  \item[Variance risk premium] Extra charge in implied variance versus realized, on average.
+\end{description}
+
+\section{References}
+
+\begin{thebibliography}{99}
+
+\bibitem{ou1930}
+G.~E.~Uhlenbeck and L.~S.~Ornstein.
+\newblock On the theory of Brownian motion.
+\newblock \emph{Physical Review}, 36:823--841, 1930.
+
+\bibitem{kelly1956}
+J.~L.~Kelly, Jr.
+\newblock A new interpretation of information rate.
+\newblock \emph{Bell System Technical Journal}, 35(4):917--926, 1956.
+
+\bibitem{vasicek1977}
+O.~Vasicek.
+\newblock An equilibrium characterization of the term structure.
+\newblock \emph{Journal of Financial Economics}, 5(2):177--188, 1977.
+
+\bibitem{parkinson1980}
+M.~Parkinson.
+\newblock The extreme value method for estimating the variance of the rate of return.
+\newblock \emph{Journal of Business}, 53(1):61--65, 1980.
+
+\bibitem{garman1980}
+M.~B.~Garman and M.~J.~Klass.
+\newblock On the estimation of security price volatilities from historical data.
+\newblock \emph{Journal of Business}, 53(1):67--78, 1980.
+
+\bibitem{blackscholes1973}
+F.~Black and M.~Scholes.
+\newblock The pricing of options and corporate liabilities.
+\newblock \emph{Journal of Political Economy}, 81(3):637--654, 1973.
+
+\bibitem{hamilton1989}
+J.~D.~Hamilton.
+\newblock A new approach to the economic analysis of nonstationary time series and the business cycle.
+\newblock \emph{Econometrica}, 57(2):357--384, 1989.
+
+\bibitem{yangzhang2000}
+D.~Yang and Q.~Zhang.
+\newblock Drift-independent volatility estimation based on high, low, open, and close prices.
+\newblock \emph{Journal of Business}, 73(3):477--491, 2000.
+
+\bibitem{hagan2002}
+P.~S.~Hagan, D.~Kumar, A.~S.~Lesniewski, and D.~E.~Woodward.
+\newblock Managing smile risk.
+\newblock \emph{Wilmott Magazine}, pages 84--108, 2002.
+
+\bibitem{gatheral2006}
+J.~Gatheral.
+\newblock \emph{The Volatility Surface: A Practitioner's Guide}.
+\newblock Wiley, 2006.
+
+\bibitem{bollerslev2009}
+T.~Bollerslev, G.~Tauchen, and H.~Zhou.
+\newblock Expected stock returns and variance risk premia.
+\newblock \emph{Review of Financial Studies}, 22(11):4463--4492, 2009.
+
+\bibitem{carrwu2009}
+P.~Carr and L.~Wu.
+\newblock Variance risk premiums.
+\newblock \emph{Review of Financial Studies}, 22(3):1311--1341, 2009.
+
+\bibitem{cboevix}
+CBOE.
+\newblock The Cboe Volatility Index -- VIX.
+\newblock White paper, Cboe Exchange, 2019.
+
+\bibitem{nsevix}
+National Stock Exchange of India.
+\newblock India VIX: white paper.
+\newblock NSE, Mumbai.
+
+\bibitem{lopez2018}
+M.~L\'opez de Prado.
+\newblock \emph{Advances in Financial Machine Learning}.
+\newblock Wiley, 2018.
+
+\bibitem{rbi}
+Reserve Bank of India.
+\newblock Monetary Policy Statements and Monetary Policy Reports.
+\newblock \url{https://www.rbi.org.in/}.
+
+\end{thebibliography}
+
+\end{document}
