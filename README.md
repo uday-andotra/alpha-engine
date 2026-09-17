@@ -1,9 +1,9 @@
 # Alpha Engine
-
+Alpha Engine is a local research pipeline for the NIFTY / India VIX complex. It estimates realized vs implied vol, a causal two-state Markov regime, and a hawkish/dovish score from RBI PDFs, then routes 2% OTM option trades and marks them with SABR/Black–Scholes. Historical rupees are a model price, not an NSE fill.
 NIFTY / INDIAVIX research stack with optional RBI statement scores.
 
 RBI PDFs are **manual**. Put them in `data/raw/mpc_archive/` yourself.
-Nothing is downloaded from the internet for policy documents.
+Nothing is downloaded from the internet for policy documents. Working on script 'downnload_rbi_pdfs.py' to automate the process.
 
 ## Setup
 
@@ -29,7 +29,7 @@ Copy MPC / Governor statement PDFs into:
 data/raw/mpc_archive/
 ```
 
-Name files with a date if you can, e.g. `MPC_2026-08-05.pdf`.
+Name files with a date if you can, e.g. `MPC_2026-08-15.pdf`.
 Then score whatever is in that folder:
 
 ```bash
